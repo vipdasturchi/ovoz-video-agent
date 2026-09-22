@@ -54,6 +54,8 @@ export interface FlowJobOptions {
   prompts: string[];
   headed?: boolean;
   perSceneTimeoutMs?: number;
+  /** Called right after each scene's clip has been downloaded, so callers can stream it out immediately. */
+  onSceneReady?: (result: FlowSceneResult) => void | Promise<void>;
 }
 
 function isChromeButton(name: string | null): boolean {
@@ -159,7 +161,7 @@ async function goBackToGallery(page: Page) {
 }
 
 export async function runFlowJob(opts: FlowJobOptions): Promise<FlowSceneResult[]> {
-  const { jobDir, prompts, headed = false, perSceneTimeoutMs = 4 * 60 * 1000 } = opts;
+  const { jobDir, prompts, headed = false, perSceneTimeoutMs = 4 * 60 * 1000, onSceneReady } = opts;
 
   let storageState: NonNullable<Parameters<Browser["newContext"]>[0]>["storageState"];
   try {
@@ -198,7 +200,9 @@ export async function runFlowJob(opts: FlowJobOptions): Promise<FlowSceneResult[
       await downloadCurrentSceneAt1080p(page, destPath);
       await goBackToGallery(page);
 
-      results.push({ index: i, prompt, filePath: destPath });
+      const sceneResult: FlowSceneResult = { index: i, prompt, filePath: destPath };
+      results.push(sceneResult);
+      if (onSceneReady) await onSceneReady(sceneResult);
     }
 
     await context.close();

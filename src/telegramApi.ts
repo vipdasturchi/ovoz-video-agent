@@ -48,14 +48,36 @@ export async function answerCallbackQuery(callbackQueryId: string, text?: string
   await call("answerCallbackQuery", { callback_query_id: callbackQueryId, text });
 }
 
-export async function sendVideo(chatId: number | string, filePath: string, caption: string): Promise<void> {
+export async function sendVideo(
+  chatId: number | string,
+  filePath: string,
+  caption: string,
+  fileName = "video.mp4"
+): Promise<void> {
   const form = new FormData();
   form.append("chat_id", String(chatId));
   form.append("caption", caption);
   const buffer = fs.readFileSync(filePath);
-  form.append("video", new Blob([buffer], { type: "video/mp4" }), "hikoya.mp4");
+  form.append("video", new Blob([buffer], { type: "video/mp4" }), fileName);
 
   const res = await fetch(`${API_BASE}/sendVideo`, { method: "POST", body: form });
   const data = (await res.json()) as { ok: boolean; description?: string };
   if (!data.ok) throw new Error(`Telegram sendVideo xatosi: ${data.description ?? res.status}`);
+}
+
+export async function sendAudio(
+  chatId: number | string,
+  filePath: string,
+  caption: string,
+  fileName = "audio.wav"
+): Promise<void> {
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  form.append("caption", caption);
+  const buffer = fs.readFileSync(filePath);
+  form.append("audio", new Blob([buffer], { type: "audio/wav" }), fileName);
+
+  const res = await fetch(`${API_BASE}/sendAudio`, { method: "POST", body: form });
+  const data = (await res.json()) as { ok: boolean; description?: string };
+  if (!data.ok) throw new Error(`Telegram sendAudio xatosi: ${data.description ?? res.status}`);
 }

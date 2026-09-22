@@ -1,7 +1,7 @@
 import { config, MAX_TEXT_LENGTH, STYLES, VOICES } from "./config.ts";
-import { getUpdates, sendMessage, sendVideo, answerCallbackQuery } from "./telegramApi.ts";
+import { getUpdates, sendMessage, sendVideo, sendAudio, answerCallbackQuery } from "./telegramApi.ts";
 import { loadState, saveState, type PendingSelection } from "./state.ts";
-import { runStoryJob, JobUserFacingError, type StoryJob } from "./pipeline/runJob.ts";
+import { runStoryJob, JobUserFacingError, type StoryJob, type JobArtifact } from "./pipeline/runJob.ts";
 
 function isAllowed(userId: string): boolean {
   if (config.telegramAllowedUserIds.length === 0) return true;
@@ -25,10 +25,25 @@ async function notifyAdmin(message: string) {
 
 async function runJobAndDeliver(chatId: number, job: StoryJob) {
   try {
-    const result = await runStoryJob(job, async (msg) => {
-      await sendMessage(chatId, msg).catch(() => {});
-    });
-    await sendVideo(chatId, result.finalVideoPath, `Tayyor! ${result.sceneCount} ta sahna, ${Math.round(result.durationSeconds)}s.`);
+    await runStoryJob(
+      job,
+      async (msg) => {
+        await sendMessage(chatId, msg).catch(() => {});
+      },
+      async (artifact: JobArtifact) => {
+        try {
+          if (artifact.kind === "audio") {
+            await sendAudio(chatId, artifact.filePath, artifact.caption, "ovoz.wav");
+          } else if (artifact.kind === "scene") {
+            await sendVideo(chatId, artifact.filePath, artifact.caption, `sahna-${artifact.index + 1}.mp4`);
+          } else {
+            await sendVideo(chatId, artifact.filePath, artifact.caption, "hikoya.mp4");
+          }
+        } catch (err) {
+          console.error(`[bot] Artifact yuborilmadi (${artifact.kind}):`, err);
+        }
+      }
+    );
   } catch (err) {
     const friendly =
       err instanceof JobUserFacingError ? err.message : `Kutilmagan xatolik yuz berdi: ${(err as Error).message}`;
