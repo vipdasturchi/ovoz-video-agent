@@ -1,5 +1,5 @@
 import { config, MAX_TEXT_LENGTH, STYLES, VOICES } from "./config.ts";
-import { getUpdates, sendMessage, sendVideo, sendAudio, answerCallbackQuery } from "./telegramApi.ts";
+import { getUpdates, sendMessage, sendVideo, sendAudio, answerCallbackQuery, type TgUpdate } from "./telegramApi.ts";
 import {
   loadState,
   saveState,
@@ -41,7 +41,6 @@ async function notifyAdmin(message: string) {
 
 async function startJob(chatId: number, userId: string, state: AgentState, job: StoryJob) {
   setJobStatus(state, userId, { id: job.id, stage: "Boshlanmoqda...", updatedAt: Date.now(), done: false });
-  saveState(state);
 
   try {
     const result = await runStoryJob(
@@ -84,197 +83,217 @@ async function startJob(chatId: number, userId: string, state: AgentState, job: 
   }
 }
 
+async function handleUpdate(update: TgUpdate, state: AgentState) {
+  if (update.message) {
+    const chatId = update.message.chat.id;
+    const userId = String(update.message.from?.id ?? chatId);
+    const text = update.message.text?.trim();
+    if (!text) return;
+
+    if (!isAllowed(userId)) {
+      await sendMessage(chatId, "Kechirasiz, sizda bu botdan foydalanish huquqi yo'q.").catch(() => {});
+      return;
+    }
+
+    if (text === "/start" || text === "/menu") {
+      await sendMessage(
+        chatId,
+        "Salom! Menga o'zbekcha hikoya matnini yuboring — men uni imlo bo'yicha tuzatib, ovozga aylantirib, hikoyaga mos fon videosi bilan birlashtirib beraman.\n\nQuyidagi menyudan ham foydalanishingiz mumkin:",
+        mainMenuButtons()
+      ).catch(() => {});
+      return;
+    }
+
+    if (text.length > MAX_TEXT_LENGTH) {
+      await sendMessage(chatId, `Matn juda uzun (${text.length} belgi). Iltimos, ${MAX_TEXT_LENGTH} belgidan kam matn yuboring.`).catch(() => {});
+      return;
+    }
+
+    state.pendingByUser[userId] = { text };
+    const defaults = state.defaultsByUser[userId];
+
+    if (defaults?.voiceName && defaults?.style) {
+      const styleLabel = STYLES.find((s) => s.id === defaults.style)?.label ?? defaults.style;
+      state.pendingByUser[userId].awaitingConfirm = true;
+      await sendMessage(chatId, `Standart sozlamalar: ${defaults.voiceName}, ${styleLabel}.`, [
+        [{ text: "✅ Shu bilan boshlash", callback_data: "confirm:go" }],
+        [{ text: "🔄 Boshqa ovoz/uslub tanlash", callback_data: "confirm:custom" }],
+      ]).catch(() => {});
+    } else {
+      await sendMessage(chatId, "Qaysi ovozda o'qilsin?", voiceButtons("voice")).catch(() => {});
+    }
+    return;
+  }
+
+  if (update.callback_query) {
+    const cq = update.callback_query;
+    const chatId = cq.message?.chat.id;
+    const userId = String(cq.from.id);
+    const data = cq.data ?? "";
+    if (!chatId || !isAllowed(userId)) {
+      await answerCallbackQuery(cq.id).catch(() => {});
+      return;
+    }
+
+    const pending: PendingSelection | undefined = state.pendingByUser[userId];
+
+    // --- Main menu ---
+    if (data === "menu:status") {
+      await answerCallbackQuery(cq.id).catch(() => {});
+      const job = state.lastJobByUser[userId];
+      if (!job) {
+        await sendMessage(chatId, "Hali hech qanday ish bo'lmagan.").catch(() => {});
+      } else {
+        const when = new Date(job.updatedAt).toLocaleString("uz-UZ");
+        const statusLine = job.done ? (job.error ? `❌ Xatolik: ${job.error}` : "✅ Tayyor") : `⏳ ${job.stage}`;
+        await sendMessage(
+          chatId,
+          `So'nggi ish (${when}):\n${statusLine}\n\nEslatma: bot har 5 daqiqada bir tekshiradi, shuning uchun holat kechikib yangilanishi mumkin.`
+        ).catch(() => {});
+      }
+      return;
+    }
+
+    if (data === "menu:history") {
+      await answerCallbackQuery(cq.id).catch(() => {});
+      const list = state.historyByUser[userId] ?? [];
+      if (list.length === 0) {
+        await sendMessage(chatId, "Hali ovozlar/videolar yaratilmagan.").catch(() => {});
+      } else {
+        const lines = list.map((h, i) => {
+          const when = new Date(h.completedAt).toLocaleString("uz-UZ");
+          return `${i + 1}. "${h.snippet}" — ${h.voiceName}, ${Math.round(h.durationSeconds)}s, ${h.sceneCount} sahna (${when})`;
+        });
+        await sendMessage(chatId, `Oxirgi ${list.length} ta ish:\n\n${lines.join("\n")}`).catch(() => {});
+      }
+      return;
+    }
+
+    if (data === "menu:settings") {
+      await answerCallbackQuery(cq.id).catch(() => {});
+      await sendMessage(chatId, "Standart ovozni tanlang:", voiceButtons("setdefault_voice")).catch(() => {});
+      return;
+    }
+
+    if (data === "menu:cancel") {
+      await answerCallbackQuery(cq.id).catch(() => {});
+      delete state.pendingByUser[userId];
+      await sendMessage(chatId, "Joriy tanlov bekor qilindi.").catch(() => {});
+      return;
+    }
+
+    // --- Default settings flow ---
+    if (data.startsWith("setdefault_voice:")) {
+      await answerCallbackQuery(cq.id).catch(() => {});
+      const voiceName = data.slice("setdefault_voice:".length);
+      state.defaultsByUser[userId] = { ...state.defaultsByUser[userId], voiceName };
+      await sendMessage(chatId, `Standart ovoz: ${voiceName}. Endi standart uslubni tanlang:`, styleButtons("setdefault_style")).catch(() => {});
+      return;
+    }
+
+    if (data.startsWith("setdefault_style:")) {
+      await answerCallbackQuery(cq.id).catch(() => {});
+      const styleId = data.slice("setdefault_style:".length);
+      state.defaultsByUser[userId] = { ...state.defaultsByUser[userId], style: styleId };
+      const d = state.defaultsByUser[userId];
+      await sendMessage(
+        chatId,
+        `Standart sozlamalar saqlandi: ${d.voiceName}, ${STYLES.find((s) => s.id === styleId)?.label}.\nEndi shunchaki hikoya matnini yuborsangiz, shu sozlamalar taklif qilinadi.`
+      ).catch(() => {});
+      return;
+    }
+
+    // --- Confirm defaults for a pending story ---
+    if (data === "confirm:go") {
+      if (!pending || !state.defaultsByUser[userId]) {
+        await answerCallbackQuery(cq.id, "Avval hikoya matnini yuboring.").catch(() => {});
+        return;
+      }
+      await answerCallbackQuery(cq.id).catch(() => {});
+      const defaults = state.defaultsByUser[userId];
+      const job: StoryJob = {
+        id: `${userId}-${Date.now()}`,
+        userId,
+        rawText: pending.text,
+        voiceName: defaults.voiceName!,
+        style: defaults.style!,
+        speed: 1.0,
+      };
+      delete state.pendingByUser[userId];
+      await sendMessage(chatId, "Qabul qilindi, tayyorlashni boshladim...").catch(() => {});
+      await startJob(chatId, userId, state, job);
+      return;
+    }
+
+    if (data === "confirm:custom") {
+      if (!pending) {
+        await answerCallbackQuery(cq.id, "Avval hikoya matnini yuboring.").catch(() => {});
+        return;
+      }
+      await answerCallbackQuery(cq.id).catch(() => {});
+      pending.awaitingConfirm = false;
+      await sendMessage(chatId, "Qaysi ovozda o'qilsin?", voiceButtons("voice")).catch(() => {});
+      return;
+    }
+
+    // --- Normal per-story voice/style selection ---
+    if (data.startsWith("voice:")) {
+      if (!pending) {
+        await answerCallbackQuery(cq.id, "Avval hikoya matnini yuboring.").catch(() => {});
+        return;
+      }
+      pending.voiceName = data.slice("voice:".length);
+      await answerCallbackQuery(cq.id).catch(() => {});
+      await sendMessage(chatId, `Ovoz: ${pending.voiceName}. Endi uslubni tanlang:`, styleButtons("style")).catch(() => {});
+      return;
+    }
+
+    if (data.startsWith("style:")) {
+      if (!pending?.voiceName) {
+        await answerCallbackQuery(cq.id, "Avval ovozni tanlang.").catch(() => {});
+        return;
+      }
+      pending.style = data.slice("style:".length);
+      await answerCallbackQuery(cq.id).catch(() => {});
+
+      const job: StoryJob = {
+        id: `${userId}-${Date.now()}`,
+        userId,
+        rawText: pending.text,
+        voiceName: pending.voiceName,
+        style: pending.style,
+        speed: 1.0,
+      };
+      delete state.pendingByUser[userId];
+
+      await sendMessage(chatId, "Qabul qilindi, tayyorlashni boshladim...").catch(() => {});
+      await startJob(chatId, userId, state, job);
+      return;
+    }
+  }
+}
+
 async function main() {
   const state = loadState();
   const updates = await getUpdates(state.lastUpdateId + 1);
 
-  for (const update of updates) {
-    state.lastUpdateId = Math.max(state.lastUpdateId, update.update_id);
-
-    if (update.message) {
-      const chatId = update.message.chat.id;
-      const userId = String(update.message.from?.id ?? chatId);
-      const text = update.message.text?.trim();
-      if (!text) continue;
-
-      if (!isAllowed(userId)) {
-        await sendMessage(chatId, "Kechirasiz, sizda bu botdan foydalanish huquqi yo'q.");
-        continue;
-      }
-
-      if (text === "/start" || text === "/menu") {
-        await sendMessage(
-          chatId,
-          "Salom! Menga o'zbekcha hikoya matnini yuboring — men uni imlo bo'yicha tuzatib, ovozga aylantirib, hikoyaga mos fon videosi bilan birlashtirib beraman.\n\nQuyidagi menyudan ham foydalanishingiz mumkin:",
-          mainMenuButtons()
+  try {
+    for (const update of updates) {
+      // Advance the offset *before* handling, and persist no matter what happens below —
+      // otherwise a single bad update would make Telegram redeliver the whole backlog forever.
+      state.lastUpdateId = Math.max(state.lastUpdateId, update.update_id);
+      try {
+        await handleUpdate(update, state);
+      } catch (err) {
+        console.error(`[bot] update_id=${update.update_id} ni qayta ishlashda xatolik:`, err);
+        await notifyAdmin(
+          `⚠️ Bitta xabarni qayta ishlashda kutilmagan xatolik (update_id=${update.update_id}): ${(err as Error).message}`
         );
-        continue;
-      }
-
-      if (text.length > MAX_TEXT_LENGTH) {
-        await sendMessage(chatId, `Matn juda uzun (${text.length} belgi). Iltimos, ${MAX_TEXT_LENGTH} belgidan kam matn yuboring.`);
-        continue;
-      }
-
-      state.pendingByUser[userId] = { text };
-      const defaults = state.defaultsByUser[userId];
-
-      if (defaults?.voiceName && defaults?.style) {
-        const styleLabel = STYLES.find((s) => s.id === defaults.style)?.label ?? defaults.style;
-        state.pendingByUser[userId].awaitingConfirm = true;
-        await sendMessage(chatId, `Standart sozlamalar: ${defaults.voiceName}, ${styleLabel}.`, [
-          [{ text: "✅ Shu bilan boshlash", callback_data: "confirm:go" }],
-          [{ text: "🔄 Boshqa ovoz/uslub tanlash", callback_data: "confirm:custom" }],
-        ]);
-      } else {
-        await sendMessage(chatId, "Qaysi ovozda o'qilsin?", voiceButtons("voice"));
-      }
-      continue;
-    }
-
-    if (update.callback_query) {
-      const cq = update.callback_query;
-      const chatId = cq.message?.chat.id;
-      const userId = String(cq.from.id);
-      const data = cq.data ?? "";
-      if (!chatId || !isAllowed(userId)) {
-        await answerCallbackQuery(cq.id).catch(() => {});
-        continue;
-      }
-
-      const pending: PendingSelection | undefined = state.pendingByUser[userId];
-
-      // --- Main menu ---
-      if (data === "menu:status") {
-        await answerCallbackQuery(cq.id);
-        const job = state.lastJobByUser[userId];
-        if (!job) {
-          await sendMessage(chatId, "Hali hech qanday ish bo'lmagan.");
-        } else {
-          const when = new Date(job.updatedAt).toLocaleString("uz-UZ");
-          const statusLine = job.done ? (job.error ? `❌ Xatolik: ${job.error}` : "✅ Tayyor") : `⏳ ${job.stage}`;
-          await sendMessage(chatId, `So'nggi ish (${when}):\n${statusLine}\n\nEslatma: bot har 5 daqiqada bir tekshiradi, shuning uchun holat kechikib yangilanishi mumkin.`);
-        }
-        continue;
-      }
-
-      if (data === "menu:history") {
-        await answerCallbackQuery(cq.id);
-        const list = state.historyByUser[userId] ?? [];
-        if (list.length === 0) {
-          await sendMessage(chatId, "Hali ovozlar/videolar yaratilmagan.");
-        } else {
-          const lines = list.map((h, i) => {
-            const when = new Date(h.completedAt).toLocaleString("uz-UZ");
-            return `${i + 1}. "${h.snippet}" — ${h.voiceName}, ${Math.round(h.durationSeconds)}s, ${h.sceneCount} sahna (${when})`;
-          });
-          await sendMessage(chatId, `Oxirgi ${list.length} ta ish:\n\n${lines.join("\n")}`);
-        }
-        continue;
-      }
-
-      if (data === "menu:settings") {
-        await answerCallbackQuery(cq.id);
-        await sendMessage(chatId, "Standart ovozni tanlang:", voiceButtons("setdefault_voice"));
-        continue;
-      }
-
-      if (data === "menu:cancel") {
-        await answerCallbackQuery(cq.id);
-        delete state.pendingByUser[userId];
-        await sendMessage(chatId, "Joriy tanlov bekor qilindi.");
-        continue;
-      }
-
-      // --- Default settings flow ---
-      if (data.startsWith("setdefault_voice:")) {
-        await answerCallbackQuery(cq.id);
-        const voiceName = data.slice("setdefault_voice:".length);
-        state.defaultsByUser[userId] = { ...state.defaultsByUser[userId], voiceName };
-        await sendMessage(chatId, `Standart ovoz: ${voiceName}. Endi standart uslubni tanlang:`, styleButtons("setdefault_style"));
-        continue;
-      }
-
-      if (data.startsWith("setdefault_style:")) {
-        await answerCallbackQuery(cq.id);
-        const styleId = data.slice("setdefault_style:".length);
-        state.defaultsByUser[userId] = { ...state.defaultsByUser[userId], style: styleId };
-        const d = state.defaultsByUser[userId];
-        await sendMessage(chatId, `Standart sozlamalar saqlandi: ${d.voiceName}, ${STYLES.find((s) => s.id === styleId)?.label}.\nEndi shunchaki hikoya matnini yuborsangiz, shu sozlamalar taklif qilinadi.`);
-        continue;
-      }
-
-      // --- Confirm defaults for a pending story ---
-      if (data === "confirm:go") {
-        if (!pending || !state.defaultsByUser[userId]) {
-          await answerCallbackQuery(cq.id, "Avval hikoya matnini yuboring.");
-          continue;
-        }
-        await answerCallbackQuery(cq.id);
-        const defaults = state.defaultsByUser[userId];
-        const job: StoryJob = {
-          id: `${userId}-${Date.now()}`,
-          userId,
-          rawText: pending.text,
-          voiceName: defaults.voiceName!,
-          style: defaults.style!,
-          speed: 1.0,
-        };
-        delete state.pendingByUser[userId];
-        await sendMessage(chatId, "Qabul qilindi, tayyorlashni boshladim...");
-        await startJob(chatId, userId, state, job);
-        continue;
-      }
-
-      if (data === "confirm:custom") {
-        if (!pending) {
-          await answerCallbackQuery(cq.id, "Avval hikoya matnini yuboring.");
-          continue;
-        }
-        await answerCallbackQuery(cq.id);
-        pending.awaitingConfirm = false;
-        await sendMessage(chatId, "Qaysi ovozda o'qilsin?", voiceButtons("voice"));
-        continue;
-      }
-
-      // --- Normal per-story voice/style selection ---
-      if (data.startsWith("voice:")) {
-        if (!pending) {
-          await answerCallbackQuery(cq.id, "Avval hikoya matnini yuboring.");
-          continue;
-        }
-        pending.voiceName = data.slice("voice:".length);
-        await answerCallbackQuery(cq.id);
-        await sendMessage(chatId, `Ovoz: ${pending.voiceName}. Endi uslubni tanlang:`, styleButtons("style"));
-        continue;
-      }
-
-      if (data.startsWith("style:")) {
-        if (!pending?.voiceName) {
-          await answerCallbackQuery(cq.id, "Avval ovozni tanlang.");
-          continue;
-        }
-        pending.style = data.slice("style:".length);
-        await answerCallbackQuery(cq.id);
-
-        const job: StoryJob = {
-          id: `${userId}-${Date.now()}`,
-          userId,
-          rawText: pending.text,
-          voiceName: pending.voiceName,
-          style: pending.style,
-          speed: 1.0,
-        };
-        delete state.pendingByUser[userId];
-
-        await sendMessage(chatId, "Qabul qilindi, tayyorlashni boshladim...");
-        await startJob(chatId, userId, state, job);
-        continue;
       }
     }
+  } finally {
+    saveState(state);
   }
-
-  saveState(state);
 }
 
 main().catch(async (err) => {
