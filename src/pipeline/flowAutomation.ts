@@ -42,6 +42,7 @@ const KNOWN_CHROME_BUTTON_NAMES = new Set([
 
 export class FlowQuotaError extends Error {}
 export class FlowAutomationError extends Error {}
+export class FlowSessionExpiredError extends Error {}
 
 export interface FlowSceneResult {
   index: number;
@@ -82,10 +83,31 @@ async function listContentThumbnails(page: Page) {
 async function submitPrompt(page: Page, prompt: string) {
   const composerPlaceholder = page.getByText("Nima yaratilishi kerak?", { exact: true });
   await composerPlaceholder.click({ timeout: 15000 });
-  await page.keyboard.type(prompt, { delay: 5 });
+  // insertText (not keyboard.type) avoids per-keystroke auto-format/autocomplete
+  // side effects some rich-text composers apply while typing — a corrupted
+  // prompt would silently generate the wrong scene rather than erroring.
+  await page.keyboard.insertText(prompt);
 
   const submitButton = page.getByRole("button", { name: "Yaratishni boshlash" });
   await submitButton.click({ timeout: 10000 });
+}
+
+/** Confirms we actually landed on a logged-in Flow project page, not a Google sign-in redirect (the saved session can expire after weeks/months). */
+async function assertLoggedIn(page: Page): Promise<void> {
+  const url = page.url();
+  if (/accounts\.google\.com/.test(url)) {
+    throw new FlowSessionExpiredError(
+      "Google Flow sessiyasi muddati tugagan (accounts.google.com'ga qaytarildi). `npm run login:flow` ni qayta ishga tushirib, FLOW_STORAGE_STATE maxfiy kalitini yangilang."
+    );
+  }
+
+  const composerPlaceholder = page.getByText("Nima yaratilishi kerak?", { exact: true });
+  const found = await composerPlaceholder.isVisible({ timeout: 20000 }).catch(() => false);
+  if (!found) {
+    throw new FlowSessionExpiredError(
+      "Flow loyiha sahifasi kutilganidek yuklanmadi (sessiya tugagan yoki loyiha URL manzili noto'g'ri bo'lishi mumkin). `npm run login:flow` ni qayta ishga tushiring va FLOW_PROJECT_URL ni tekshiring."
+    );
+  }
 }
 
 async function detectQuotaError(page: Page): Promise<string | null> {
@@ -188,6 +210,7 @@ export async function runFlowJob(opts: FlowJobOptions): Promise<FlowSceneResult[
 
     await page.goto(config.flowProjectUrl, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(3000);
+    await assertLoggedIn(page);
 
     for (let i = 0; i < prompts.length; i++) {
       const prompt = prompts[i];

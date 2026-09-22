@@ -1,13 +1,7 @@
 import { config, MAX_TEXT_LENGTH, STYLES, VOICES } from "./config.ts";
 import { getUpdates, sendMessage, sendVideo, sendAudio, answerCallbackQuery, type TgUpdate } from "./telegramApi.ts";
-import {
-  loadState,
-  saveState,
-  pushHistory,
-  setJobStatus,
-  type PendingSelection,
-  type AgentState,
-} from "./state.ts";
+import { loadState, pushHistory, setJobStatus, type PendingSelection, type AgentState } from "./state.ts";
+import { checkpoint } from "./checkpoint.ts";
 import { runStoryJob, JobUserFacingError, type StoryJob, type JobArtifact } from "./pipeline/runJob.ts";
 
 function isAllowed(userId: string): boolean {
@@ -32,11 +26,27 @@ function mainMenuButtons() {
   ];
 }
 
+/** Fire-and-forget send that never throws and always leaves a trace if it fails. */
+async function safeSend(chatId: number | string, text: string, buttons?: { text: string; callback_data: string }[][]) {
+  try {
+    await sendMessage(chatId, text, buttons);
+  } catch (err) {
+    console.error(`[bot] sendMessage muvaffaqiyatsiz (chat ${chatId}):`, err);
+  }
+}
+
 async function notifyAdmin(message: string) {
   if (!config.telegramAdminChatId) return;
-  await sendMessage(config.telegramAdminChatId, message).catch((err) =>
-    console.error("[bot] Adminga xabar yuborib bo'lmadi:", err)
-  );
+  try {
+    await sendMessage(config.telegramAdminChatId, message);
+  } catch (err) {
+    console.error("[bot] Adminga xabar yuborib bo'lmadi:", err);
+  }
+}
+
+function hasCompleteDefaults(state: AgentState, userId: string): boolean {
+  const d = state.defaultsByUser[userId];
+  return Boolean(d?.voiceName && d?.style);
 }
 
 async function startJob(chatId: number, userId: string, state: AgentState, job: StoryJob) {
@@ -47,7 +57,8 @@ async function startJob(chatId: number, userId: string, state: AgentState, job: 
       job,
       async (msg) => {
         setJobStatus(state, userId, { id: job.id, stage: msg, updatedAt: Date.now(), done: false });
-        await sendMessage(chatId, msg).catch(() => {});
+        checkpoint(state, `job ${job.id} progress`);
+        await safeSend(chatId, msg);
       },
       async (artifact: JobArtifact) => {
         try {
@@ -59,7 +70,9 @@ async function startJob(chatId: number, userId: string, state: AgentState, job: 
             await sendVideo(chatId, artifact.filePath, artifact.caption, "hikoya.mp4");
           }
         } catch (err) {
-          console.error(`[bot] Artifact yuborilmadi (${artifact.kind}):`, err);
+          console.error(`[bot] Artifact yuborilmadi (${artifact.kind}, job ${job.id}):`, err);
+          await safeSend(chatId, `⚠️ "${artifact.caption}" ni yuborishda xatolik yuz berdi, davom etamiz...`);
+          await notifyAdmin(`Artifact yuborilmadi (${artifact.kind}, job ${job.id}, chat ${chatId}): ${(err as Error).message}`);
         }
       }
     );
@@ -78,8 +91,10 @@ async function startJob(chatId: number, userId: string, state: AgentState, job: 
     const friendly =
       err instanceof JobUserFacingError ? err.message : `Kutilmagan xatolik yuz berdi: ${(err as Error).message}`;
     setJobStatus(state, userId, { id: job.id, stage: "Xatolik", updatedAt: Date.now(), done: true, error: friendly });
-    await sendMessage(chatId, `Xatolik: ${friendly}`).catch(() => {});
+    await safeSend(chatId, `Xatolik: ${friendly}`);
     await notifyAdmin(`Ish muvaffaqiyatsiz tugadi.\nChat: ${chatId}\nJob: ${job.id}\nXato: ${friendly}`);
+  } finally {
+    checkpoint(state, `job ${job.id} finished`);
   }
 }
 
@@ -91,36 +106,35 @@ async function handleUpdate(update: TgUpdate, state: AgentState) {
     if (!text) return;
 
     if (!isAllowed(userId)) {
-      await sendMessage(chatId, "Kechirasiz, sizda bu botdan foydalanish huquqi yo'q.").catch(() => {});
+      await safeSend(chatId, "Kechirasiz, sizda bu botdan foydalanish huquqi yo'q.");
       return;
     }
 
     if (text === "/start" || text === "/menu") {
-      await sendMessage(
+      await safeSend(
         chatId,
         "Salom! Menga o'zbekcha hikoya matnini yuboring — men uni imlo bo'yicha tuzatib, ovozga aylantirib, hikoyaga mos fon videosi bilan birlashtirib beraman.\n\nQuyidagi menyudan ham foydalanishingiz mumkin:",
         mainMenuButtons()
-      ).catch(() => {});
+      );
       return;
     }
 
     if (text.length > MAX_TEXT_LENGTH) {
-      await sendMessage(chatId, `Matn juda uzun (${text.length} belgi). Iltimos, ${MAX_TEXT_LENGTH} belgidan kam matn yuboring.`).catch(() => {});
+      await safeSend(chatId, `Matn juda uzun (${text.length} belgi). Iltimos, ${MAX_TEXT_LENGTH} belgidan kam matn yuboring.`);
       return;
     }
 
     state.pendingByUser[userId] = { text };
-    const defaults = state.defaultsByUser[userId];
 
-    if (defaults?.voiceName && defaults?.style) {
+    if (hasCompleteDefaults(state, userId)) {
+      const defaults = state.defaultsByUser[userId];
       const styleLabel = STYLES.find((s) => s.id === defaults.style)?.label ?? defaults.style;
-      state.pendingByUser[userId].awaitingConfirm = true;
-      await sendMessage(chatId, `Standart sozlamalar: ${defaults.voiceName}, ${styleLabel}.`, [
+      await safeSend(chatId, `Standart sozlamalar: ${defaults.voiceName}, ${styleLabel}.`, [
         [{ text: "✅ Shu bilan boshlash", callback_data: "confirm:go" }],
         [{ text: "🔄 Boshqa ovoz/uslub tanlash", callback_data: "confirm:custom" }],
-      ]).catch(() => {});
+      ]);
     } else {
-      await sendMessage(chatId, "Qaysi ovozda o'qilsin?", voiceButtons("voice")).catch(() => {});
+      await safeSend(chatId, "Qaysi ovozda o'qilsin?", voiceButtons("voice"));
     }
     return;
   }
@@ -131,85 +145,94 @@ async function handleUpdate(update: TgUpdate, state: AgentState) {
     const userId = String(cq.from.id);
     const data = cq.data ?? "";
     if (!chatId || !isAllowed(userId)) {
-      await answerCallbackQuery(cq.id).catch(() => {});
+      await answerCallbackQuery(cq.id).catch((err) => console.error("[bot] answerCallbackQuery muvaffaqiyatsiz:", err));
       return;
     }
 
+    const ack = () => answerCallbackQuery(cq.id).catch((err) => console.error("[bot] answerCallbackQuery muvaffaqiyatsiz:", err));
     const pending: PendingSelection | undefined = state.pendingByUser[userId];
 
     // --- Main menu ---
     if (data === "menu:status") {
-      await answerCallbackQuery(cq.id).catch(() => {});
+      await ack();
       const job = state.lastJobByUser[userId];
       if (!job) {
-        await sendMessage(chatId, "Hali hech qanday ish bo'lmagan.").catch(() => {});
+        await safeSend(chatId, "Hali hech qanday ish bo'lmagan.");
       } else {
         const when = new Date(job.updatedAt).toLocaleString("uz-UZ");
         const statusLine = job.done ? (job.error ? `❌ Xatolik: ${job.error}` : "✅ Tayyor") : `⏳ ${job.stage}`;
-        await sendMessage(
+        await safeSend(
           chatId,
           `So'nggi ish (${when}):\n${statusLine}\n\nEslatma: bot har 5 daqiqada bir tekshiradi, shuning uchun holat kechikib yangilanishi mumkin.`
-        ).catch(() => {});
+        );
       }
       return;
     }
 
     if (data === "menu:history") {
-      await answerCallbackQuery(cq.id).catch(() => {});
+      await ack();
       const list = state.historyByUser[userId] ?? [];
       if (list.length === 0) {
-        await sendMessage(chatId, "Hali ovozlar/videolar yaratilmagan.").catch(() => {});
+        await safeSend(chatId, "Hali ovozlar/videolar yaratilmagan.");
       } else {
         const lines = list.map((h, i) => {
           const when = new Date(h.completedAt).toLocaleString("uz-UZ");
           return `${i + 1}. "${h.snippet}" — ${h.voiceName}, ${Math.round(h.durationSeconds)}s, ${h.sceneCount} sahna (${when})`;
         });
-        await sendMessage(chatId, `Oxirgi ${list.length} ta ish:\n\n${lines.join("\n")}`).catch(() => {});
+        await safeSend(chatId, `Oxirgi ${list.length} ta ish:\n\n${lines.join("\n")}`);
       }
       return;
     }
 
     if (data === "menu:settings") {
-      await answerCallbackQuery(cq.id).catch(() => {});
-      await sendMessage(chatId, "Standart ovozni tanlang:", voiceButtons("setdefault_voice")).catch(() => {});
+      await ack();
+      await safeSend(chatId, "Standart ovozni tanlang:", voiceButtons("setdefault_voice"));
       return;
     }
 
     if (data === "menu:cancel") {
-      await answerCallbackQuery(cq.id).catch(() => {});
+      await ack();
       delete state.pendingByUser[userId];
-      await sendMessage(chatId, "Joriy tanlov bekor qilindi.").catch(() => {});
+      await safeSend(chatId, "Joriy tanlov bekor qilindi.");
       return;
     }
 
     // --- Default settings flow ---
     if (data.startsWith("setdefault_voice:")) {
-      await answerCallbackQuery(cq.id).catch(() => {});
+      await ack();
       const voiceName = data.slice("setdefault_voice:".length);
+      if (!(VOICES as readonly string[]).includes(voiceName)) return;
       state.defaultsByUser[userId] = { ...state.defaultsByUser[userId], voiceName };
-      await sendMessage(chatId, `Standart ovoz: ${voiceName}. Endi standart uslubni tanlang:`, styleButtons("setdefault_style")).catch(() => {});
+      await safeSend(chatId, `Standart ovoz: ${voiceName}. Endi standart uslubni tanlang:`, styleButtons("setdefault_style"));
       return;
     }
 
     if (data.startsWith("setdefault_style:")) {
-      await answerCallbackQuery(cq.id).catch(() => {});
+      await ack();
       const styleId = data.slice("setdefault_style:".length);
+      const styleDef = STYLES.find((s) => s.id === styleId);
+      if (!styleDef) return;
       state.defaultsByUser[userId] = { ...state.defaultsByUser[userId], style: styleId };
-      const d = state.defaultsByUser[userId];
-      await sendMessage(
+      await safeSend(
         chatId,
-        `Standart sozlamalar saqlandi: ${d.voiceName}, ${STYLES.find((s) => s.id === styleId)?.label}.\nEndi shunchaki hikoya matnini yuborsangiz, shu sozlamalar taklif qilinadi.`
-      ).catch(() => {});
+        `Standart sozlamalar saqlandi: ${state.defaultsByUser[userId].voiceName}, ${styleDef.label}.\nEndi shunchaki hikoya matnini yuborsangiz, shu sozlamalar taklif qilinadi.`
+      );
       return;
     }
 
     // --- Confirm defaults for a pending story ---
     if (data === "confirm:go") {
-      if (!pending || !state.defaultsByUser[userId]) {
-        await answerCallbackQuery(cq.id, "Avval hikoya matnini yuboring.").catch(() => {});
+      if (!pending) {
+        await ack();
+        await safeSend(chatId, "Avval hikoya matnini yuboring.");
         return;
       }
-      await answerCallbackQuery(cq.id).catch(() => {});
+      if (!hasCompleteDefaults(state, userId)) {
+        await ack();
+        await safeSend(chatId, "Standart sozlamalar to'liq emas. Qaysi ovozda o'qilsin?", voiceButtons("voice"));
+        return;
+      }
+      await ack();
       const defaults = state.defaultsByUser[userId];
       const job: StoryJob = {
         id: `${userId}-${Date.now()}`,
@@ -220,41 +243,54 @@ async function handleUpdate(update: TgUpdate, state: AgentState) {
         speed: 1.0,
       };
       delete state.pendingByUser[userId];
-      await sendMessage(chatId, "Qabul qilindi, tayyorlashni boshladim...").catch(() => {});
+      await safeSend(chatId, "Qabul qilindi, tayyorlashni boshladim...");
       await startJob(chatId, userId, state, job);
       return;
     }
 
     if (data === "confirm:custom") {
       if (!pending) {
-        await answerCallbackQuery(cq.id, "Avval hikoya matnini yuboring.").catch(() => {});
+        await ack();
+        await safeSend(chatId, "Avval hikoya matnini yuboring.");
         return;
       }
-      await answerCallbackQuery(cq.id).catch(() => {});
-      pending.awaitingConfirm = false;
-      await sendMessage(chatId, "Qaysi ovozda o'qilsin?", voiceButtons("voice")).catch(() => {});
+      await ack();
+      await safeSend(chatId, "Qaysi ovozda o'qilsin?", voiceButtons("voice"));
       return;
     }
 
     // --- Normal per-story voice/style selection ---
     if (data.startsWith("voice:")) {
       if (!pending) {
-        await answerCallbackQuery(cq.id, "Avval hikoya matnini yuboring.").catch(() => {});
+        await ack();
+        await safeSend(chatId, "Avval hikoya matnini yuboring.");
         return;
       }
-      pending.voiceName = data.slice("voice:".length);
-      await answerCallbackQuery(cq.id).catch(() => {});
-      await sendMessage(chatId, `Ovoz: ${pending.voiceName}. Endi uslubni tanlang:`, styleButtons("style")).catch(() => {});
+      const voiceName = data.slice("voice:".length);
+      if (!(VOICES as readonly string[]).includes(voiceName)) {
+        await ack();
+        return;
+      }
+      pending.voiceName = voiceName;
+      await ack();
+      await safeSend(chatId, `Ovoz: ${pending.voiceName}. Endi uslubni tanlang:`, styleButtons("style"));
       return;
     }
 
     if (data.startsWith("style:")) {
       if (!pending?.voiceName) {
-        await answerCallbackQuery(cq.id, "Avval ovozni tanlang.").catch(() => {});
+        await ack();
+        await safeSend(chatId, "Avval ovozni tanlang.");
         return;
       }
-      pending.style = data.slice("style:".length);
-      await answerCallbackQuery(cq.id).catch(() => {});
+      const styleId = data.slice("style:".length);
+      const styleDef = STYLES.find((s) => s.id === styleId);
+      if (!styleDef) {
+        await ack();
+        return;
+      }
+      pending.style = styleId;
+      await ack();
 
       const job: StoryJob = {
         id: `${userId}-${Date.now()}`,
@@ -266,38 +302,76 @@ async function handleUpdate(update: TgUpdate, state: AgentState) {
       };
       delete state.pendingByUser[userId];
 
-      await sendMessage(chatId, "Qabul qilindi, tayyorlashni boshladim...").catch(() => {});
+      await safeSend(chatId, "Qabul qilindi, tayyorlashni boshladim...");
       await startJob(chatId, userId, state, job);
       return;
     }
+
+    // Unknown callback_data (e.g. from a stale/old inline keyboard) — ack so Telegram stops showing a spinner, do nothing else.
+    await ack();
   }
+}
+
+let liveState: AgentState | null = null;
+
+function installSignalHandlers() {
+  const handleSignal = (signal: string) => {
+    console.error(`[bot] ${signal} qabul qilindi — chiqishdan oldin oxirgi holatni saqlashga urinilmoqda...`);
+    if (liveState) checkpoint(liveState, `${signal} - majburiy to'xtash`);
+    process.exit(1);
+  };
+  process.on("SIGTERM", () => handleSignal("SIGTERM"));
+  process.on("SIGINT", () => handleSignal("SIGINT"));
+  process.on("uncaughtException", (err) => {
+    console.error("[bot] uncaughtException:", err);
+    if (liveState) checkpoint(liveState, "uncaughtException");
+  });
+  process.on("unhandledRejection", (reason) => {
+    console.error("[bot] unhandledRejection:", reason);
+  });
 }
 
 async function main() {
-  const state = loadState();
-  const updates = await getUpdates(state.lastUpdateId + 1);
+  installSignalHandlers();
 
+  const state = loadState();
+  liveState = state;
+
+  let updates: TgUpdate[];
   try {
-    for (const update of updates) {
-      // Advance the offset *before* handling, and persist no matter what happens below —
-      // otherwise a single bad update would make Telegram redeliver the whole backlog forever.
-      state.lastUpdateId = Math.max(state.lastUpdateId, update.update_id);
-      try {
-        await handleUpdate(update, state);
-      } catch (err) {
-        console.error(`[bot] update_id=${update.update_id} ni qayta ishlashda xatolik:`, err);
-        await notifyAdmin(
-          `⚠️ Bitta xabarni qayta ishlashda kutilmagan xatolik (update_id=${update.update_id}): ${(err as Error).message}`
-        );
-      }
+    updates = await getUpdates(state.lastUpdateId + 1);
+  } catch (err) {
+    console.error("[bot] getUpdates muvaffaqiyatsiz:", err);
+    await notifyAdmin(`Yangilanishlarni olishda xatolik (getUpdates): ${(err as Error).message}`);
+    return; // nothing was fetched — no state changed, nothing to checkpoint
+  }
+
+  for (const update of updates) {
+    // Advance + persist the offset BEFORE handling, so a slow/crashing
+    // handler (a story job can legitimately run for a long time) can never
+    // cause Telegram to re-deliver this update on the next run.
+    state.lastUpdateId = Math.max(state.lastUpdateId, update.update_id);
+    checkpoint(state, `update ${update.update_id} received`);
+
+    try {
+      await handleUpdate(update, state);
+    } catch (err) {
+      console.error(`[bot] update_id=${update.update_id} ni qayta ishlashda xatolik:`, err);
+      await notifyAdmin(
+        `⚠️ Bitta xabarni qayta ishlashda kutilmagan xatolik (update_id=${update.update_id}): ${(err as Error).message}`
+      );
     }
-  } finally {
-    saveState(state);
+
+    checkpoint(state, `update ${update.update_id} handled`);
   }
 }
 
-main().catch(async (err) => {
-  console.error("[fatal]", err);
-  await notifyAdmin(`Agent ishga tushishda xatolik: ${(err as Error).message}`).catch(() => {});
-  process.exit(1);
-});
+main()
+  .catch(async (err) => {
+    console.error("[fatal]", err);
+    await notifyAdmin(`Agent ishga tushishda xatolik: ${(err as Error).message}`);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    if (liveState) checkpoint(liveState, "run finished");
+  });

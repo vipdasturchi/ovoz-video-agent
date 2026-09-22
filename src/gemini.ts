@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import { config, STYLE_INSTRUCTIONS, VOICE_MAP } from "./config.ts";
+import { withRetry } from "./retry.ts";
 
 const ai = new GoogleGenAI({ apiKey: config.geminiApiKey });
 
@@ -12,12 +13,20 @@ export async function enhanceText(text: string): Promise<string> {
     `Matn: ${text}`,
   ].join("\n");
 
-  const response = await ai.models.generateContent({
-    model: "gemini-3.5-flash",
-    contents: [{ parts: [{ text: prompt }] }],
-  });
+  const response = await withRetry(
+    () => ai.models.generateContent({ model: "gemini-3.5-flash", contents: [{ parts: [{ text: prompt }] }] }),
+    { label: "Gemini enhanceText" }
+  );
 
-  return response.text?.trim() || text;
+  const result = response.text?.trim();
+  // An empty/missing response is silently falling back to the original text is
+  // worse than it sounds here — it means unfixed spelling gets narrated. Only
+  // fall back if the model genuinely gave us nothing usable; log so it's visible.
+  if (!result) {
+    console.error("[gemini] enhanceText bo'sh natija qaytardi, asl matn ishlatiladi.");
+    return text;
+  }
+  return result;
 }
 
 export interface SynthesizedVoice {
@@ -38,24 +47,30 @@ export async function synthesizeVoice(
   const styleInstruction = STYLE_INSTRUCTIONS[style] ?? STYLE_INSTRUCTIONS.natural;
   const prompt = `Quyidagi matnni ${styleInstruction} ravishda o'qib ber: ${text}`;
 
-  const response = await ai.models.generateContent({
-    model: "gemini-3.1-flash-tts-preview",
-    contents: [{ parts: [{ text: prompt }] }],
-    config: {
-      responseModalities: ["AUDIO"],
-      speechConfig: {
-        voiceConfig: {
-          prebuiltVoiceConfig: { voiceName: resolvedSystemVoice },
+  const response = await withRetry(
+    () =>
+      ai.models.generateContent({
+        model: "gemini-3.1-flash-tts-preview",
+        contents: [{ parts: [{ text: prompt }] }],
+        config: {
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: resolvedSystemVoice },
+            },
+          },
         },
-      },
-    },
-  });
+      }),
+    { label: "Gemini synthesizeVoice" }
+  );
 
   const part = response.candidates?.[0]?.content?.parts?.[0];
   const audioBase64 = part?.inlineData?.data;
   if (!audioBase64) throw new Error("Model audio ma'lumotini qaytarmadi (TTS).");
 
   const pcmBytes = Buffer.from(audioBase64, "base64");
+  if (pcmBytes.length === 0) throw new Error("Model bo'sh audio qaytardi (TTS).");
+
   const sampleRate = 24000;
   const channels = 1;
   const bitDepth = 16;
@@ -81,25 +96,37 @@ export async function planScenes(storyText: string, durationSeconds: number, sce
     `The narrated audio is about ${Math.round(durationSeconds)} seconds long. Produce exactly ${sceneCount} scenes, each covering ${sceneSeconds} seconds, in chronological story order.`,
     "For each scene write ONE English video-generation prompt: describe the shot (camera framing, subject, action), lighting/mood, and camera movement. Cinematic, photorealistic, film grain. Always end every prompt with: 'no text, no subtitles, no UI.'",
     "Do not include any dialogue or spoken words in the prompts — these are silent background visuals only.",
-    "Respond with ONLY a raw JSON array of strings (no markdown fences, no explanation), one string per scene, in the exact order they should play.",
+    `Respond with ONLY a raw JSON array of exactly ${sceneCount} strings (no markdown fences, no explanation), one string per scene, in the exact order they should play.`,
     "",
     "Story (Uzbek):",
     storyText,
   ].join("\n");
 
-  const response = await ai.models.generateContent({
-    model: "gemini-3.5-flash",
-    contents: [{ parts: [{ text: prompt }] }],
-  });
+  const response = await withRetry(
+    () => ai.models.generateContent({ model: "gemini-3.5-flash", contents: [{ parts: [{ text: prompt }] }] }),
+    { label: "Gemini planScenes" }
+  );
 
   const raw = response.text?.trim() ?? "[]";
   const jsonMatch = raw.match(/\[[\s\S]*\]/);
   if (!jsonMatch) throw new Error("Sahna promptlarini generatsiya qilishda xatolik: model JSON qaytarmadi.");
 
-  const prompts = JSON.parse(jsonMatch[0]) as string[];
-  if (!Array.isArray(prompts) || prompts.length === 0) {
-    throw new Error("Sahna promptlarini generatsiya qilishda xatolik: bo'sh natija.");
+  let prompts: unknown;
+  try {
+    prompts = JSON.parse(jsonMatch[0]);
+  } catch {
+    throw new Error("Sahna promptlarini generatsiya qilishda xatolik: model noto'g'ri JSON qaytardi.");
   }
 
-  return { prompts };
+  if (!Array.isArray(prompts) || prompts.length === 0 || !prompts.every((p) => typeof p === "string" && p.trim())) {
+    throw new Error("Sahna promptlarini generatsiya qilishda xatolik: bo'sh yoki noto'g'ri formatdagi natija.");
+  }
+
+  // The model is asked for exactly `sceneCount` but LLM output length isn't
+  // guaranteed — clamp so downstream (video/audio duration matching) stays sane
+  // instead of silently drifting scene count away from what was planned for.
+  const clamped = prompts.slice(0, sceneCount);
+  while (clamped.length < sceneCount) clamped.push(clamped[clamped.length - 1] ?? "A calm cinematic establishing shot, no text, no subtitles, no UI.");
+
+  return { prompts: clamped };
 }

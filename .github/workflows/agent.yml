@@ -15,19 +15,44 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # A single story job can legitimately take a long time (many Flow scenes,
+    # each with its own multi-minute generation wait). 30 minutes was too
+    # tight for anything beyond a very short story and risked the job being
+    # force-killed mid-run — the script checkpoints state as it goes
+    # specifically to survive that, but avoiding the kill in the first place
+    # is better. 180 minutes comfortably covers the ~2-minute-story use case
+    # with a wide safety margin, well under GitHub's ~360 minute hard cap.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
+        # Even with a cache hit the browser binary is already there, but
+        # --with-deps also ensures the OS-level shared libraries are present;
+        # skipping it on a cache hit previously caused the exact
+        # "missing shared library" failure this project hit on shared
+        # hosting, so we always run it and only skip the (slow) download part.
+
+      - name: Configure git identity
+        run: |
+          git config user.name "ovoz-video-agent"
+          git config user.email "actions@users.noreply.github.com"
 
       - name: Run one polling cycle
         env:
@@ -38,11 +63,18 @@ jobs:
           FLOW_STORAGE_STATE: ${{ secrets.FLOW_STORAGE_STATE }}
           FLOW_PROJECT_URL: ${{ vars.FLOW_PROJECT_URL }}
         run: npm run run-once
+        # The script itself checkpoints (commits + pushes state/state.json)
+        # incrementally as it processes each update, so lastUpdateId is
+        # durable even if this step is later killed by timeout-minutes or
+        # crashes outright. This step is allowed to fail here — the safety
+        # net below still runs.
 
-      - name: Commit updated state
+      - name: Commit updated state (safety net)
+        if: always()
         run: |
-          git config user.name "ovoz-video-agent"
-          git config user.email "actions@users.noreply.github.com"
           git add state/state.json
-          git diff --cached --quiet || git commit -m "chore: update bot state [skip ci]"
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update bot state [skip ci]"
+          fi
+          git pull --rebase --autostash
           git push
