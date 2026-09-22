@@ -1,0 +1,20 @@
+{
+  "name": "ovoz-video-agent",
+  "version": "2.0.0",
+  "type": "module",
+  "scripts": {
+    "run-once": "tsx src/runOnce.ts",
+    "login:flow": "tsx scripts/flow-login.ts"
+  },
+  "dependencies": {
+    "@google/genai": "^2.4.0",
+    "dotenv": "^17.2.3",
+    "ffmpeg-static": "^5.2.0",
+    "playwright": "^1.48.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2"
+  }
+}
