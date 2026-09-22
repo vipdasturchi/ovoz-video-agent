@@ -17,8 +17,8 @@ export const config = {
     .filter(Boolean),
   telegramAdminChatId: process.env.TELEGRAM_ADMIN_CHAT_ID?.trim() || null,
 
-  flowStorageState: required("FLOW_STORAGE_STATE"), // base64-encoded JSON, from a GitHub secret
-  flowProjectUrl: required("FLOW_PROJECT_URL"),
+  cloudflareAccountId: required("CLOUDFLARE_ACCOUNT_ID"),
+  cloudflareApiToken: required("CLOUDFLARE_API_TOKEN"),
 
   dataDir: path.resolve(process.env.DATA_DIR ?? "./data/jobs"),
   stateDir: path.resolve(process.env.STATE_DIR ?? "./state"),

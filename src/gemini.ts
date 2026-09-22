@@ -85,16 +85,19 @@ export interface ScenePlan {
 
 /**
  * Reads the (already-corrected) Uzbek story and returns an ordered list of
- * English, Flow-ready cinematic video prompts — one per 8s scene — covering
- * the narrative from start to finish and sized to the narration's duration.
+ * English still-image prompts — one per 8s scene — covering the narrative
+ * from start to finish and sized to the narration's duration. Each image
+ * later becomes a video clip via a Ken Burns pan/zoom (see assembleVideo.ts)
+ * rather than true AI video generation, so prompts describe a single static
+ * frame, not camera movement or action-in-progress.
  */
 export async function planScenes(storyText: string, durationSeconds: number, sceneSeconds: number): Promise<ScenePlan> {
   const sceneCount = Math.max(1, Math.ceil(durationSeconds / sceneSeconds));
 
   const prompt = [
-    "You are a film director breaking an Uzbek short story into a storyboard for an AI text-to-video model (Google Veo).",
-    `The narrated audio is about ${Math.round(durationSeconds)} seconds long. Produce exactly ${sceneCount} scenes, each covering ${sceneSeconds} seconds, in chronological story order.`,
-    "For each scene write ONE English video-generation prompt: describe the shot (camera framing, subject, action), lighting/mood, and camera movement. Cinematic, photorealistic, film grain. Always end every prompt with: 'no text, no subtitles, no UI.'",
+    "You are an illustrator breaking an Uzbek short story into a storyboard of still images for an AI text-to-image model.",
+    `The narrated audio is about ${Math.round(durationSeconds)} seconds long. Produce exactly ${sceneCount} scenes, each representing about ${sceneSeconds} seconds of the story, in chronological order.`,
+    "For each scene write ONE English image-generation prompt describing a single static frame: subject, setting, composition, lighting/mood. Cinematic, photorealistic, film grain, 16:9 wide shot. Do NOT describe motion, camera movement, or multiple moments — one still frame only. Always end every prompt with: 'no text, no subtitles, no watermark, no UI.'",
     "Do not include any dialogue or spoken words in the prompts — these are silent background visuals only.",
     `Respond with ONLY a raw JSON array of exactly ${sceneCount} strings (no markdown fences, no explanation), one string per scene, in the exact order they should play.`,
     "",
@@ -126,7 +129,7 @@ export async function planScenes(storyText: string, durationSeconds: number, sce
   // guaranteed — clamp so downstream (video/audio duration matching) stays sane
   // instead of silently drifting scene count away from what was planned for.
   const clamped = prompts.slice(0, sceneCount);
-  while (clamped.length < sceneCount) clamped.push(clamped[clamped.length - 1] ?? "A calm cinematic establishing shot, no text, no subtitles, no UI.");
+  while (clamped.length < sceneCount) clamped.push(clamped[clamped.length - 1] ?? "A calm cinematic establishing shot, photorealistic, no text, no subtitles, no watermark, no UI.");
 
   return { prompts: clamped };
 }

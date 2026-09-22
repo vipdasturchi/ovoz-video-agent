@@ -20,6 +20,56 @@ function run(args: string[]): Promise<void> {
   });
 }
 
+const OUTPUT_WIDTH = 1920;
+const OUTPUT_HEIGHT = 1080;
+const FPS = 25;
+
+/**
+ * Turns a single still image into an N-second 1080p video clip with a slow
+ * center zoom ("Ken Burns effect" — the same technique documentaries use
+ * over photographs). This is how motion is added to AI-generated still
+ * images without needing a (paid) real video-generation model.
+ */
+export async function imageToKenBurnsClip(imagePath: string, outputPath: string, durationSeconds: number): Promise<void> {
+  if (!fs.existsSync(imagePath)) throw new Error(`Rasm fayli topilmadi: ${imagePath}`);
+
+  const totalFrames = Math.max(1, Math.round(durationSeconds * FPS));
+  // Upscale+crop to a large fixed canvas first (source images can be any
+  // resolution/aspect ratio) so zoompan has headroom to zoom into without
+  // ever upscaling blurrily beyond what the crop already provides.
+  const vf = [
+    "scale=3840:2160:force_original_aspect_ratio=increase",
+    "crop=3840:2160",
+    `zoompan=z='min(zoom+0.0008\\,1.3)':d=${totalFrames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}:fps=${FPS}`,
+    "format=yuv420p",
+  ].join(",");
+
+  await run([
+    "-y",
+    "-loop",
+    "1",
+    "-i",
+    imagePath,
+    "-t",
+    String(durationSeconds),
+    "-vf",
+    vf,
+    "-c:v",
+    "libx264",
+    "-crf",
+    "18",
+    "-preset",
+    "medium",
+    "-pix_fmt",
+    "yuv420p",
+    outputPath,
+  ]);
+
+  if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size === 0) {
+    throw new Error("Sahna videosi (Ken Burns effekti) yaratilmadi yoki bo'sh chiqdi.");
+  }
+}
+
 export async function assembleFinalVideo(params: {
   jobDir: string;
   clipPaths: string[];
@@ -70,14 +120,18 @@ export async function assembleFinalVideo(params: {
   }
 }
 
-/** Re-encodes at a lower bitrate/resolution to shrink the file, used when the assembled video is too large for Telegram's 50MB upload limit. */
+/**
+ * Re-encodes at a lower bitrate to shrink the file, used when the assembled
+ * video is too large for Telegram's 50MB upload limit. Resolution is kept
+ * at 1080p (the user explicitly wants 1080p delivery) — slow-pan content
+ * over mostly-static images compresses very well even at a low bitrate, so
+ * this should rarely need to trade resolution away at all.
+ */
 export async function reencodeToFitSize(inputPath: string, outputPath: string, targetBitrateKbps: number): Promise<void> {
   await run([
     "-y",
     "-i",
     inputPath,
-    "-vf",
-    "scale=-2:720",
     "-c:v",
     "libx264",
     "-b:v",

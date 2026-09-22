@@ -3,8 +3,8 @@ import path from "node:path";
 import { config, SCENE_SECONDS } from "../config.ts";
 import { enhanceText, planScenes, synthesizeVoice } from "../gemini.ts";
 import { buildWavBuffer } from "../wav.ts";
-import { runFlowJob, FlowQuotaError, FlowAutomationError, FlowSessionExpiredError, type FlowSceneResult } from "./flowAutomation.ts";
-import { assembleFinalVideo, reencodeToFitSize } from "./assembleVideo.ts";
+import { generateSceneImage, ImageGenerationError } from "./imageGeneration.ts";
+import { assembleFinalVideo, imageToKenBurnsClip, reencodeToFitSize } from "./assembleVideo.ts";
 import { TELEGRAM_UPLOAD_LIMIT_BYTES } from "../telegramApi.ts";
 
 export interface StoryJob {
@@ -73,9 +73,7 @@ export async function runStoryJob(
     caption: `🎙️ Ovoz tayyor (${Math.round(voice.durationSeconds)}s, ${job.voiceName})`,
   });
 
-  await onProgress(
-    `🎬 Sahnalar rejalashtirilmoqda (~${Math.round(voice.durationSeconds)}s audio uchun)...`
-  );
+  await onProgress(`🎬 Sahnalar rejalashtirilmoqda (~${Math.round(voice.durationSeconds)}s audio uchun)...`);
   let scenePlan;
   try {
     scenePlan = await planScenes(correctedText, voice.durationSeconds, SCENE_SECONDS);
@@ -84,42 +82,30 @@ export async function runStoryJob(
   }
 
   const totalScenes = scenePlan.prompts.length;
-  await onProgress(
-    `📹 ${totalScenes} ta video sahna Flow'da generatsiya qilinmoqda. Bu bir necha daqiqa davom etishi mumkin...`
-  );
-  let sceneResults;
-  try {
-    sceneResults = await runFlowJob({
-      jobDir,
-      prompts: scenePlan.prompts,
-      onSceneReady: async (scene: FlowSceneResult) => {
-        await onArtifact({
-          kind: "scene",
-          filePath: scene.filePath,
-          caption: `🎬 Sahna ${scene.index + 1}/${totalScenes}`,
-          index: scene.index,
-          total: totalScenes,
-        });
-      },
+  await onProgress(`🖼️ ${totalScenes} ta sahna rasmi va videosi tayyorlanmoqda...`);
+
+  const clipPaths: string[] = [];
+  for (let i = 0; i < totalScenes; i++) {
+    const prompt = scenePlan.prompts[i];
+    const imagePath = path.join(jobDir, `scene-${String(i + 1).padStart(2, "0")}.jpg`);
+    const clipPath = path.join(jobDir, `scene-${String(i + 1).padStart(2, "0")}.mp4`);
+
+    try {
+      await generateSceneImage(prompt, imagePath);
+      await imageToKenBurnsClip(imagePath, clipPath, SCENE_SECONDS);
+    } catch (err) {
+      const detail = err instanceof ImageGenerationError ? err.message : (err as Error).message;
+      throw new JobUserFacingError(`⚠️ ${i + 1}-sahnani tayyorlashda xatolik yuz berdi: ${detail}`);
+    }
+
+    clipPaths.push(clipPath);
+    await onArtifact({
+      kind: "scene",
+      filePath: clipPath,
+      caption: `🎬 Sahna ${i + 1}/${totalScenes}`,
+      index: i,
+      total: totalScenes,
     });
-  } catch (err) {
-    if (err instanceof FlowQuotaError) {
-      throw new JobUserFacingError(
-        `⚠️ Flow'da limit/kvota tugadi. Iltimos, birozdan so'ng qayta urinib ko'ring yoki Flow hisobingizni tekshiring.\n\nTafsilot: ${err.message}`
-      );
-    }
-    if (err instanceof FlowSessionExpiredError) {
-      throw new JobUserFacingError(
-        `⚠️ Video generatsiya xizmatiga ulanishda muammo (sessiya tugagan bo'lishi mumkin). Admin bilan bog'laning.\n\nTafsilot: ${err.message}`
-      );
-    }
-    if (err instanceof FlowAutomationError) {
-      throw new JobUserFacingError(`⚠️ Video generatsiyasida texnik xatolik: ${err.message}`);
-    }
-    // Anything else (Playwright timeouts, browser crashes, etc.) — don't leak
-    // a raw stack trace to the end user, but keep the original message for
-    // the admin notification that wraps this at the call site.
-    throw new JobUserFacingError(`⚠️ Video generatsiyasida kutilmagan texnik xatolik yuz berdi: ${(err as Error).message}`);
   }
 
   await onProgress("🎞️ Video va ovoz birlashtirilmoqda...");
@@ -127,7 +113,7 @@ export async function runStoryJob(
   try {
     await assembleFinalVideo({
       jobDir,
-      clipPaths: sceneResults.map((s) => s.filePath),
+      clipPaths,
       narrationWavPath,
       outputPath: finalVideoPath,
     });
@@ -140,17 +126,17 @@ export async function runStoryJob(
   await onArtifact({
     kind: "final",
     filePath: deliverablePath,
-    caption: `✅ Tayyor! ${sceneResults.length} ta sahna, ${Math.round(voice.durationSeconds)}s.`,
+    caption: `✅ Tayyor! ${clipPaths.length} ta sahna, ${Math.round(voice.durationSeconds)}s.`,
   });
 
   return {
     finalVideoPath: deliverablePath,
     durationSeconds: voice.durationSeconds,
-    sceneCount: sceneResults.length,
+    sceneCount: clipPaths.length,
   };
 }
 
-/** Telegram bot uploads cap at 50MB; a multi-minute 1080p video can exceed that. Re-encode down once before giving up. */
+/** Telegram bot uploads cap at 50MB. Re-encode down once before giving up (resolution stays 1080p — see assembleVideo.ts). */
 async function ensureUnderUploadLimit(jobDir: string, videoPath: string, onProgress: ProgressCallback): Promise<string> {
   const size = fs.statSync(videoPath).size;
   if (size <= TELEGRAM_UPLOAD_LIMIT_BYTES) return videoPath;

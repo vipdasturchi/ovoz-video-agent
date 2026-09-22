@@ -1,5 +1,5 @@
 import { config, MAX_TEXT_LENGTH, STYLES, VOICES } from "./config.ts";
-import { getUpdates, sendMessage, sendVideo, sendAudio, answerCallbackQuery, type TgUpdate } from "./telegramApi.ts";
+import { getUpdates, sendMessage, sendDocument, sendAudio, answerCallbackQuery, type TgUpdate } from "./telegramApi.ts";
 import { loadState, pushHistory, setJobStatus, type PendingSelection, type AgentState } from "./state.ts";
 import { checkpoint } from "./checkpoint.ts";
 import { runStoryJob, JobUserFacingError, type StoryJob, type JobArtifact } from "./pipeline/runJob.ts";
@@ -65,9 +65,10 @@ async function startJob(chatId: number, userId: string, state: AgentState, job: 
           if (artifact.kind === "audio") {
             await sendAudio(chatId, artifact.filePath, artifact.caption, "ovoz.wav");
           } else if (artifact.kind === "scene") {
-            await sendVideo(chatId, artifact.filePath, artifact.caption, `sahna-${artifact.index + 1}.mp4`);
+            // sendDocument (not sendVideo) so Telegram delivers the 1080p file as-is, uncompressed.
+            await sendDocument(chatId, artifact.filePath, artifact.caption, `sahna-${artifact.index + 1}.mp4`);
           } else {
-            await sendVideo(chatId, artifact.filePath, artifact.caption, "hikoya.mp4");
+            await sendDocument(chatId, artifact.filePath, artifact.caption, "hikoya.mp4");
           }
         } catch (err) {
           console.error(`[bot] Artifact yuborilmadi (${artifact.kind}, job ${job.id}):`, err);

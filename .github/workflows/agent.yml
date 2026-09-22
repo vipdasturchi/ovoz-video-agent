@@ -15,14 +15,12 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    # A single story job can legitimately take a long time (many Flow scenes,
-    # each with its own multi-minute generation wait). 30 minutes was too
-    # tight for anything beyond a very short story and risked the job being
-    # force-killed mid-run — the script checkpoints state as it goes
-    # specifically to survive that, but avoiding the kill in the first place
-    # is better. 180 minutes comfortably covers the ~2-minute-story use case
-    # with a wide safety margin, well under GitHub's ~360 minute hard cap.
-    timeout-minutes: 180
+    # Scene "video" is now a still image (Cloudflare Workers AI) + an ffmpeg
+    # Ken Burns pan/zoom, both of which take seconds, not minutes — nothing
+    # like the old Flow browser-automation wait per scene. 45 minutes is a
+    # generous margin for even a long story; the script still checkpoints
+    # state as it goes regardless, in case ffmpeg/network hiccups add up.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -33,21 +31,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
-        # Even with a cache hit the browser binary is already there, but
-        # --with-deps also ensures the OS-level shared libraries are present;
-        # skipping it on a cache hit previously caused the exact
-        # "missing shared library" failure this project hit on shared
-        # hosting, so we always run it and only skip the (slow) download part.
 
       - name: Configure git identity
         run: |
@@ -60,8 +43,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_ALLOWED_USER_IDS: ${{ vars.TELEGRAM_ALLOWED_USER_IDS }}
           TELEGRAM_ADMIN_CHAT_ID: ${{ vars.TELEGRAM_ADMIN_CHAT_ID }}
-          FLOW_STORAGE_STATE: ${{ secrets.FLOW_STORAGE_STATE }}
-          FLOW_PROJECT_URL: ${{ vars.FLOW_PROJECT_URL }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: npm run run-once
         # The script itself checkpoints (commits + pushes state/state.json)
         # incrementally as it processes each update, so lastUpdateId is

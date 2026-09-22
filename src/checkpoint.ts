@@ -2,8 +2,8 @@ import { execFileSync } from "node:child_process";
 import { saveState, type AgentState } from "./state.ts";
 
 /**
- * A single story job can legitimately run for a long time (many Flow scenes,
- * each with its own multi-minute generation wait). If the whole process gets
+ * A single story job can legitimately run for a while (many scenes, each
+ * needing an image generation call + ffmpeg encode). If the whole process gets
  * killed mid-job — CI timeout, runner OOM, a crash — anything that only
  * lives in memory (or only in the workflow's end-of-run "commit state" step)
  * is lost, and Telegram's lastUpdateId would never advance, which is exactly

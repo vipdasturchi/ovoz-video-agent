@@ -93,8 +93,8 @@ function assertUploadable(filePath: string): number {
 }
 
 async function uploadFile(
-  method: "sendVideo" | "sendAudio",
-  fieldName: "video" | "audio",
+  method: "sendVideo" | "sendAudio" | "sendDocument",
+  fieldName: "video" | "audio" | "document",
   mimeType: string,
   chatId: number | string,
   filePath: string,
@@ -129,15 +129,6 @@ async function uploadFile(
   );
 }
 
-export async function sendVideo(
-  chatId: number | string,
-  filePath: string,
-  caption: string,
-  fileName = "video.mp4"
-): Promise<void> {
-  await uploadFile("sendVideo", "video", "video/mp4", chatId, filePath, caption, fileName);
-}
-
 export async function sendAudio(
   chatId: number | string,
   filePath: string,
@@ -145,4 +136,20 @@ export async function sendAudio(
   fileName = "audio.wav"
 ): Promise<void> {
   await uploadFile("sendAudio", "audio", "audio/wav", chatId, filePath, caption, fileName);
+}
+
+/**
+ * sendVideo asks Telegram clients to treat the file as a streaming video,
+ * which can trigger server-side re-compression for the in-app player.
+ * sendDocument delivers the exact bytes untouched (shown as a downloadable
+ * file instead of an inline player) — used for scene/final videos per the
+ * user's explicit "don't send it compressed" requirement. Same 50MB cap.
+ */
+export async function sendDocument(
+  chatId: number | string,
+  filePath: string,
+  caption: string,
+  fileName = "video.mp4"
+): Promise<void> {
+  await uploadFile("sendDocument", "document", "video/mp4", chatId, filePath, caption, fileName);
 }
